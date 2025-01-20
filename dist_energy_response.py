@@ -20,7 +20,7 @@ bin_edges = [0.2, 0.7, 1.0, 1.3, 1.8, 2.5, 2.8, 3.2, 3.5, 4.5]
 bins = np.linspace(bin_edges[0], bin_edges[-1], 101)
 
 h_ufo = hist.Hist(hist.axis.Variable(bins, label="Value [GeV]"))
-# h_pfo = hist.Hist(hist.axis.Variable(bins, label="Value [GeV]"))
+h_pfo = hist.Hist(hist.axis.Variable(bins, label="Value [GeV]"))
 h_pfo_jz2 = hist.Hist(hist.axis.Variable(bins, label="Value [GeV]"))
 
 @nb.njit
@@ -78,20 +78,17 @@ def getEnergyResponse(a,b):
     data = [calcEnergyResp(x,y) for x,y in zip(a,b)]
     return data
 
-def getHist(filename):
-    file = uproot.open(filename)
-    tree = file["JetConstituentTree"]
-    data = tree.arrays(['truthJet_pt','truthJet_eta', 'truthJet_phi','jet_eta', 'jet_phi','jet_pt'], library="ak")
-    # remove events with any empty arrays
-    pts = data["truthJet_pt"]
-    cut = ak.any(pts!=0, axis=1)
-    eventData = data[cut]
-    zipd_t = ak.zip({"phi": eventData["truthJet_phi"], "eta": eventData["truthJet_eta"], "pt": eventData["truthJet_pt"]/1000 })
-    zipd_t = ak.values_astype(zipd_t, "float32")        
-    zipd_r = ak.zip({"phi": eventData["jet_phi"], "eta": eventData["jet_eta"], "pt": eventData["jet_pt"]/1000 })
-    zipd_r = ak.values_astype(zipd_r, "float32")
-    data_energyResp = getEnergyResponse(zipd_t,zipd_r)
-    histogram.fill(ak.flatten(data_energyResp))
+def fillHist(filename, histogram):
+    for batch in uproot.iterate(f"{filename}:JetConstituentTree", ['truthJet_pt','truthJet_eta', 'truthJet_phi','jet_eta', 'jet_phi','jet_pt'], step_size=100000):
+        pts = batch["truthJet_pt"]
+        cut = ak.any(pts!=0, axis=1)
+        eventData = batch[cut]
+        zipd_t = ak.zip({"phi": eventData["truthJet_phi"], "eta": eventData["truthJet_eta"], "pt": eventData["truthJet_pt"]/1000 })
+        zipd_t = ak.values_astype(zipd_t, "float32")        
+        zipd_r = ak.zip({"phi": eventData["jet_phi"], "eta": eventData["jet_eta"], "pt": eventData["jet_pt"]/1000 })
+        zipd_r = ak.values_astype(zipd_r, "float32")
+        data_energyResp = getEnergyResponse(zipd_t,zipd_r)
+        histogram.fill(ak.flatten(data_energyResp))
 
 def getHist(file_list, histogram):
     for file in file_list:
@@ -112,41 +109,43 @@ ax2 = fig.add_subplot(gs[1])  # Smaller subplot
 
 s = time.time()
 getHist(ufoFiles, h_ufo)
-# getHist(pfoFiles, h_pfo)
-getHist(pfo2Files, h_pfo_jz2)
+getHist(pfoFiles, h_pfo)
+# getHist(pfo2Files, h_pfo_jz2)
 e = time.time()
 print(f"{e-s:.2f} seconds for datasets")
 
-bin_centers = (h_ufo.axes[0].edges[:-1] + h_ufo.axes[0].edges[1:]) / 2
+bin_centers_ufo = (h_ufo.axes[0].edges[:-1] + h_ufo.axes[0].edges[1:]) / 2
+bin_centers_pfo = (h_pfo.axes[0].edges[:-1] + h_pfo.axes[0].edges[1:]) / 2
 
-def getMeanStdDev(values):
+def getMeanStdDev(bin_centers, values):
     mean = np.sum(bin_centers * values) / np.sum(values)
     std_dev = np.sqrt(np.sum(values * (bin_centers - mean)**2) / np.sum(values))
     return mean, std_dev
 
-mean_ufo, std_dev_ufo = getMeanStdDev(h_ufo.values())
-mean_pfo, std_dev_pfo = getMeanStdDev(h_pfo_jz2.values())
+mean_ufo, std_dev_ufo = getMeanStdDev(bin_centers_ufo, h_ufo.values())
+mean_pfo, std_dev_pfo = getMeanStdDev(bin_centers_pfo, h_pfo.values())
 
 label1 = f"UFO+CSSK Mean: {mean_ufo:.2f}, Std Dev: {std_dev_ufo:.2f}"
-label2 = f"PFlow_JZ2 Mean: {mean_pfo:.2f}, Std Dev: {std_dev_pfo:.2f}"
+label2 = f"PFlow Mean: {mean_pfo:.2f}, Std Dev: {std_dev_pfo:.2f}"
 
 # Plot stacked histograms
 h_ufo.plot1d(ax=ax1, label=label1, color="blue", stack=True)
-# h_pfo.plot1d(ax=ax1, label=label2, color="red", stack=True)
-h_pfo_jz2.plot1d(ax=ax1, label=label2, color="red", stack=True)
+h_pfo.plot1d(ax=ax1, label=label2, color="red", stack=True)
+# h_pfo_jz2.plot1d(ax=ax1, label=label2, color="red", stack=True)
 
 ax1.set_xlabel('Value')
 ax1.set_ylabel('Frequency')
 ax1.set_yscale("log")
 ax1.set_title('Distribution of Energy Response of Matched Reconstructed Jets')
 ax1.legend(loc="best")
+
 # Calculate the ratio of the histograms (avoid division by zero)
 with np.errstate(divide='ignore', invalid='ignore'):
     # ratio = h_ufo.values() / h_pfo.values()
     ratio = h_ufo.values() / h_pfo_jz2.values()
 
 # # Plot the ratio
-ax2.plot(bin_centers, ratio, label='Ratio (UFO+CSSK / PFlow_JZ2)', color='purple')
+ax2.plot(bin_centers_ufo, ratio, label='Ratio (UFO+CSSK / PFlow)', color='purple')
 ax2.set_xlabel('Value')
 # ax2.set_xlabel('Value [\eta]')
 ax2.set_ylabel('Ratio')
@@ -156,5 +155,5 @@ ax2.legend()
 
 # Show the plots
 plt.tight_layout()
-plt.savefig("ufocssk_pflowjz2_energyResponsePt.png")
+plt.savefig("test_ufocssk_pflow_energyResponsePt.png")
     
